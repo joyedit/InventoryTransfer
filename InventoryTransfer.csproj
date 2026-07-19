@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AllowMissingPrunePackageData>true</AllowMissingPrunePackageData>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <OutputType>Library</OutputType>
+    <AssemblyTitle>InventoryTransfer</AssemblyTitle>
+    <AssemblyVersion>1.9.0.0</AssemblyVersion>
+    <VINTAGE_STORY_PATH>/home/deftones/Apps/vintagestory</VINTAGE_STORY_PATH>
+    <!-- Keep the default **/*.cs glob from sweeping the 1.21 (net8) build's generated
+         AssemblyInfo.cs, which lives outside the standard obj/ and would otherwise cause
+         CS0579 duplicate-attribute errors. Does not change what this build compiles. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);bin-1.21/**;obj-1.21/**</DefaultItemExcludes>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="VintagestoryAPI">
+      <HintPath>$(VINTAGE_STORY_PATH)/VintagestoryAPI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="VintagestoryLib">
+      <HintPath>$(VINTAGE_STORY_PATH)/VintagestoryLib.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="VSSurvivalMod">
+      <HintPath>$(VINTAGE_STORY_PATH)/Mods/VSSurvivalMod.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="VSEssentials">
+      <HintPath>$(VINTAGE_STORY_PATH)/Mods/VSEssentials.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+</Project>

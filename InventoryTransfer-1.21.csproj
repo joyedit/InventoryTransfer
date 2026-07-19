@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AllowMissingPrunePackageData>true</AllowMissingPrunePackageData>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <OutputType>Library</OutputType>
+    <AssemblyTitle>InventoryTransfer</AssemblyTitle>
+    <AssemblyVersion>1.9.0.0</AssemblyVersion>
+    <!-- Isolated outputs so this build never touches the net10/1.22 bin+obj -->
+    <BaseOutputPath>bin-1.21/</BaseOutputPath>
+    <BaseIntermediateOutputPath>obj-1.21/</BaseIntermediateOutputPath>
+    <!-- Don't let the default glob sweep the net10 build's obj/*.AssemblyInfo.cs (CS0579) -->
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <DefineConstants>$(DefineConstants);VS1_21</DefineConstants>
+    <VINTAGE_STORY_PATH>/home/deftones/Downloads/vintagestory</VINTAGE_STORY_PATH>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="src/**/*.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <Reference Include="VintagestoryAPI">
+      <HintPath>$(VINTAGE_STORY_PATH)/VintagestoryAPI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="VintagestoryLib">
+      <HintPath>$(VINTAGE_STORY_PATH)/VintagestoryLib.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="VSSurvivalMod">
+      <HintPath>$(VINTAGE_STORY_PATH)/Mods/VSSurvivalMod.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="VSEssentials">
+      <HintPath>$(VINTAGE_STORY_PATH)/Mods/VSEssentials.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+</Project>

@@ -1,0 +1,69 @@
+{
+	code: "importchest",
+	class: "BlockGenericTypedContainer",
+	entityclass: "ImportChest",
+	attributes: {
+		humanoidTraversalCost: 100,
+		reinforcable: false,
+		partialAttachable: true,
+		inventoryClassName: "chest",
+		defaultType: "golden",
+		types: ["golden"],
+		rotatatableInterval: { "golden": "22.5deg" },
+		drop: { "golden": false },
+		quantitySlots: { "golden": 100 },
+		quantityColumns: { "golden": 10 },
+		dialogTitleLangCode: { "golden": "inventorytransfer:importchest-title" },
+		storageType: { "golden": 255 },
+		retrieveOnly: { "golden": true },
+		collisionSelectionBoxes: {
+			"golden": [{ x1: 0.125, y1: 0, z1: 0.1875, x2: 0.875, y2: 0.4875, z2: 0.75 }]
+		},
+		shape: { "golden": "game:block/wood/chest/golden" },
+		openSound: { path: "block/chestopen", pitch: { avg: 1.0, var: 0.25 } },
+		closeSound: { path: "block/chestclose", pitch: { avg: 1.0, var: 0.25 } },
+		variantByGroup: "side",
+		variantByGroupInventory: null
+	},
+	behaviors: [
+		{ name: "Container" }
+	],
+	entityBehaviors: [{ name: "Animatable" }],
+	variantgroups: [
+		{ code: "side", loadFromProperties: "abstract/horizontalorientation" }
+	],
+	creativeinventory: { },
+	shapeInventory: { base: "game:block/wood/chest/golden", rotateY: 270 },
+	shapeByType: {
+		"*-north": { base: "game:block/wood/chest/golden", rotateY: 0 },
+		"*-east":  { base: "game:block/wood/chest/golden", rotateY: 270 },
+		"*-west":  { base: "game:block/wood/chest/golden", rotateY: 90 },
+		"*-south": { base: "game:block/wood/chest/golden", rotateY: 180 }
+	},
+	textures: {
+		"golden-top":    { base: "game:block/wood/chest/golden/top" },
+		"golden-sides2": { base: "game:block/wood/chest/golden/sides2" },
+		"golden-sides1": { base: "game:block/wood/chest/golden/sides1" },
+		"golden-inside": { base: "game:block/wood/chest/golden/inside" }
+	},
+	blockmaterial: "Wood",
+	replaceable: 900,
+	resistance: 99999,
+	lightAbsorption: 0,
+	sideAo: { all: false },
+	sidesolid: { all: false },
+	sideopaque: { all: false },
+	collisionbox: { x1: 0.125, y1: 0, z1: 0.1875, x2: 0.875, y2: 0.4875, z2: 0.75 },
+	selectionbox: { x1: 0.125, y1: 0, z1: 0.1875, x2: 0.875, y2: 0.4875, z2: 0.75 },
+	sounds: {
+		"place": "block/planks",
+		"hit": "block/planks",
+		"break": "block/planks",
+		"walk": "walk/wood"
+	},
+	materialDensity: 600,
+	guiTransform: {
+		origin: { x: 0.5, y: 0.4, z: 0.5 },
+		scale: 1.16
+	}
+}
