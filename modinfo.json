@@ -4,7 +4,7 @@
   "name": "Inventory Transfer",
   "authors": ["Feyd"],
   "description": "Export loot from one world and import it into another.",
-  "version": "1.9.0",
+  "version": "1.9.1",
   "dependencies": {
     "game": ""
   }
