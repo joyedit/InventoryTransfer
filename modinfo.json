@@ -3,8 +3,8 @@
   "modid": "inventorytransfer",
   "name": "Inventory Transfer",
   "authors": ["Feyd"],
-  "description": "Export loot from one world and import it into another.",
-  "version": "1.9.1",
+  "description": "Export loot from one world and import it into another. NOT compatible with PlayerInventoryLib: it replaces the character/backpack inventories that this mod reads, so transfers silently miss or duplicate items (no errors in the logs). Remove PlayerInventoryLib before transferring.",
+  "version": "1.10.0",
   "dependencies": {
     "game": ""
   }

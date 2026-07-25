@@ -40,9 +40,9 @@ namespace InventoryTransfer
         public override void StartServerSide(ICoreServerAPI api)
         {
             api.ChatCommands.Create("exportinv")
-                .WithDescription("Exports inventory, nearby containers (as furniture), decor, windmill/mechanical parts; excludes liquids (Radius 30). Add '--all' to also scan every placed crafted build block (walls/floors/doors/etc., skipping natural terrain).")
+                .WithDescription("Exports inventory, nearby containers (as furniture), decor, windmill/mechanical parts; excludes liquids (Radius 30). Add '--all' to also scan every placed crafted build block (walls/floors/doors/etc., skipping natural terrain). '--all --purge' turns the export into a CUT: after the manifest is safely written, everything exported is removed from the world — whatever remains is exactly what was NOT exported. Removed items stay recoverable via /importinv. CAUTION: liquids are never exported and are lost on purge.")
                 .RequiresPrivilege(Privilege.chat)
-                .WithArgs(api.ChatCommands.Parsers.OptionalWord("mode"))
+                .WithArgs(api.ChatCommands.Parsers.OptionalWord("mode"), api.ChatCommands.Parsers.OptionalWord("flag"))
                 .HandleWith(OnCmdExport);
 
             api.ChatCommands.Create("importinv")
@@ -52,18 +52,47 @@ namespace InventoryTransfer
                 .HandleWith(OnCmdImport);
         }
 
+        // PlayerInventoryLib (modid playerinventorylib) REPLACES the character and backpack
+        // inventories with its own implementations, but export reads the vanilla inventories
+        // by id ("character"/"backpack" via GetOwnInventory) and skips worn-bag content slots
+        // by concrete type (ItemSlotBagContent) — with the lib installed a transfer runs
+        // without any exception yet silently misses or mangles items. Warn, don't abort:
+        // container-only transfers may still be fine and the player may know what they're doing.
+        private static void WarnIfPlayerInventoryLib(ICoreAPI api, IServerPlayer player)
+        {
+            if (!api.ModLoader.IsModEnabled("playerinventorylib")) return;
+            player.SendMessage(GlobalConstants.GeneralChatGroup,
+                "WARNING: PlayerInventoryLib is installed. It replaces the character and backpack inventories, which Inventory Transfer reads directly — transfers can silently miss or duplicate items with NO errors in the logs. Remove PlayerInventoryLib before exporting or importing.",
+                EnumChatType.Notification);
+        }
+
         private TextCommandResult OnCmdExport(TextCommandCallingArgs args)
         {
             IServerPlayer player = args.Caller.Player as IServerPlayer;
 
             // '--all' (also accepts 'all'/'-all') scans every placed crafted build block in range.
+            // '--purge' (requires --all, either arg order) removes everything the export
+            // captured from the world AFTER the manifest is safely written — the export becomes
+            // a cut instead of a copy, and whatever is left standing/in inventories is exactly
+            // what the exporter did not pick up.
             string mode = args.Parsers.Count > 0 ? args[0] as string : null;
-            bool allBlocks = !string.IsNullOrEmpty(mode) && mode.TrimStart('-').Equals("all", StringComparison.OrdinalIgnoreCase);
+            string flag = args.Parsers.Count > 1 ? args[1] as string : null;
+            bool HasWord(string w) =>
+                (!string.IsNullOrEmpty(mode) && mode.TrimStart('-').Equals(w, StringComparison.OrdinalIgnoreCase)) ||
+                (!string.IsNullOrEmpty(flag) && flag.TrimStart('-').Equals(w, StringComparison.OrdinalIgnoreCase));
+            bool allBlocks = HasWord("all");
+            bool purge = HasWord("purge");
+            if (purge && !allBlocks)
+            {
+                return TextCommandResult.Error("--purge only works together with --all: /exportinv --all --purge");
+            }
 
             if (player.WorldData.CurrentGameMode == EnumGameMode.Creative)
             {
                 return TextCommandResult.Error("Export aborted: you are in Creative mode. Creative-mode inventory will be scooped into the manifest and on import TryGiveItemstack always succeeds, so the overflow import chests will never spawn and items will be lost into creative storage. Switch to Survival, then run /exportinv again.");
             }
+
+            WarnIfPlayerInventoryLib(player.Entity.Api, player);
 
             SavedInventoryData saveData = new SavedInventoryData();
             
@@ -114,11 +143,55 @@ namespace InventoryTransfer
             // real thing) and, belt-and-braces, never scan the same block entity twice.
             HashSet<BlockEntity> seenBlockEntities = new HashSet<BlockEntity>();
 
+            // --purge: world positions to clear once the manifest has been written.
+            List<BlockPos> purgePositions = purge ? new List<BlockPos>() : null;
+            // Decor-layer entries to clear: (host position, faceAndSubposition decor index).
+            List<(BlockPos pos, int decorIndex)> purgeDecors = purge ? new List<(BlockPos, int)>() : null;
+
+            // --all diagnostic: block codes the walk saw but did NOT export — either a path
+            // matched but OnPickBlock returned nothing (clutter behaves this way), or the block
+            // has a block entity yet fell through every path. Dumped to the server log so missed
+            // codes can be identified by name, not just by screenshot.
+            Dictionary<string, int> skippedReport = allBlocks ? new Dictionary<string, int>() : null;
+            void ReportSkip(string reason, string code)
+            {
+                if (skippedReport == null) return;
+                string key = reason + " " + code;
+                skippedReport[key] = skippedReport.GetValueOrDefault(key, 0) + 1;
+            }
+
             player.Entity.World.BlockAccessor.WalkBlocks(minPos, maxPos, (block, x, y, z) =>
             {
                 BlockPos pos = new BlockPos(x, y, z);
                 string blockCode = block.Code?.Path ?? "";
-                if (blockCode.StartsWith("multiblock")) return;
+
+                // PATH 0: THE DECOR LAYER. Blocks with the "Decor" behavior — vanilla rugs,
+                // small/medium carpets, rush mats, and modded equivalents — are NOT placed
+                // blocks: they live in the chunk's separate decor layer, which WalkBlocks never
+                // visits. Enumerate them per position or they are completely invisible to the
+                // export (found via --purge testing: rugs were the only thing left standing).
+                // The full variant (color/pattern/piece) is encoded in the block code, so a
+                // plain ItemStack of the decor block round-trips faithfully.
+                Dictionary<int, Block> subDecors = player.Entity.World.BlockAccessor.GetSubDecors(pos);
+                if (subDecors != null)
+                {
+                    foreach (var kv in subDecors)
+                    {
+                        Block decorBlock = kv.Value;
+                        if (decorBlock == null || decorBlock.Id == 0) continue;
+                        allSlots.Add((new DummySlot(new ItemStack(decorBlock)), "decor"));
+                        decorPicked++;
+                        purgeDecors?.Add((pos, kv.Key));
+                    }
+                }
+
+                if (blockCode.StartsWith("multiblock"))
+                {
+                    // Surrogate positions render as part of their principal structure; when the
+                    // principal is purged the surrogates must go too or they linger as ghosts.
+                    purgePositions?.Add(pos);
+                    return;
+                }
 
                 BlockEntity be = player.Entity.World.BlockAccessor.GetBlockEntity(pos);
 
@@ -150,6 +223,14 @@ namespace InventoryTransfer
                     {
                         allSlots.Add((new DummySlot(pickedContainer), "container_block"));
                         containerBlocksPicked++;
+                        purgePositions?.Add(pos);
+                    }
+                    else if (blockCode.StartsWith("groundstorage"))
+                    {
+                        // Ground storage IS its contents (captured from the slots above); the
+                        // block has no exportable identity of its own, so purge clears it rather
+                        // than leaving an emptied ghost pile that would read as "missed".
+                        purgePositions?.Add(pos);
                     }
                     return;
                 }
@@ -170,7 +251,9 @@ namespace InventoryTransfer
                     {
                         allSlots.Add((new DummySlot(picked), "decor"));
                         decorPicked++;
+                        purgePositions?.Add(pos);
                     }
+                    else ReportSkip("pick-failed (decor):", blockCode);
                 }
                 // PATH 3: windmill / mechanical-power parts. The rotor (with its sails), wooden
                 // axles, angled + large gears, transmission and the clutch/brake/toggle controls
@@ -190,7 +273,9 @@ namespace InventoryTransfer
                     {
                         allSlots.Add((new DummySlot(picked), "mechanical"));
                         mechanicalPicked++;
+                        purgePositions?.Add(pos);
                     }
+                    else ReportSkip("pick-failed (mechanical):", blockCode);
                 }
                 // PATH 3.5: standalone FUNCTIONAL FURNITURE that isn't a container (so PATH 1
                 // misses it) and isn't decor/mechanical, but is clearly placed by the player and
@@ -214,7 +299,9 @@ namespace InventoryTransfer
                     {
                         allSlots.Add((new DummySlot(picked), "furniture"));
                         furniturePicked++;
+                        purgePositions?.Add(pos);
                     }
+                    else ReportSkip("pick-failed (furniture):", blockCode);
                 }
                 // PATH 4 (--all only): every other placed crafted build block — planks, stone
                 // bricks/cobble, doors, fences, ladders, slabs, stairs, glass, metal, ceramic,
@@ -228,7 +315,15 @@ namespace InventoryTransfer
                     {
                         allSlots.Add((new DummySlot(picked), "block"));
                         buildBlocksPicked++;
+                        purgePositions?.Add(pos);
                     }
+                    else ReportSkip("pick-failed (build block):", blockCode);
+                }
+                // FALL-THROUGH DIAGNOSTIC (--all): a block entity we matched no path for is the
+                // prime suspect for missed content (clutter, exotic modded furniture, ...).
+                else if (be != null)
+                {
+                    ReportSkip("unhandled block entity:", blockCode);
                 }
             });
 
@@ -310,7 +405,10 @@ namespace InventoryTransfer
                 // culled as bulk material despite the user opting it in by storing items in it.
                 // Bag contents are exempt too: the bag travels empty, so its packed bulk (chalk,
                 // coal, etc.) must survive as loose stacks or it would be silently lost.
-                if (stack.Class == EnumItemClass.Block && source != "container_block" && source != "decor" && source != "bag" && source != "mechanical" && source != "block" && source != "furniture")
+                // In --all mode the whole bulk cull is OFF: --all means "take everything", so
+                // logs, planks, stone and soil sitting in trunks/chests/player inventory are
+                // stored property and must travel (they were being silently dropped before).
+                if (!allBlocks && stack.Class == EnumItemClass.Block && source != "container_block" && source != "decor" && source != "bag" && source != "mechanical" && source != "block" && source != "furniture")
                 {
                     Block block = stack.Block;
                     if (!block.Code.Path.Contains("chest") &&
@@ -374,6 +472,52 @@ namespace InventoryTransfer
 
             args.Caller.Player.Entity.Api.StoreModConfig(saveData, "feyd_inventory_transfer.json");
 
+            // --- PURGE --- runs strictly AFTER the manifest write above, so every removed item
+            // is recoverable via import (same world or another — the once-per-world guard keys
+            // on manifest id, and this manifest is freshly stamped). Empties every real slot the
+            // scan captured (player + container contents; DummySlot picks aren't world-backed)
+            // and clears every picked block position. Whatever remains in the world afterwards
+            // is precisely what the export did not capture. NB: slots holding by-design-excluded
+            // stacks (liquids) are emptied too — that content is NOT in the manifest.
+            int purgedSlots = 0, purgedBlocks = 0;
+            if (purge)
+            {
+                foreach (var (slot, source) in allSlots)
+                {
+                    if (source != "player" && source != "container") continue;
+                    if (slot.Empty) continue;
+                    slot.Itemstack = null;
+                    slot.MarkDirty();
+                    purgedSlots++;
+                }
+                IBlockAccessor accessor = player.Entity.World.BlockAccessor;
+                foreach (BlockPos pos in purgePositions)
+                {
+                    accessor.SetBlock(0, pos);
+                    purgedBlocks++;
+                }
+                // Decor layer: SetDecor with the air block removes cleanly WITHOUT dropping the
+                // decor as an item (BreakDecor would drop it — with Better Ruins' rugs-drop-
+                // itself patch that means dup: the rug in the manifest AND on the ground).
+                Block airBlock = accessor.GetBlock(0);
+                foreach (var (dpos, decorIndex) in purgeDecors)
+                {
+                    accessor.SetDecor(airBlock, dpos, decorIndex);
+                    purgedBlocks++;
+                }
+            }
+
+            // Skipped-block report (--all): full list to server-main.log, count in chat.
+            if (skippedReport != null && skippedReport.Count > 0)
+            {
+                var logger = player.Entity.Api.Logger;
+                logger.Notification("[inventorytransfer] exportinv --all skipped-block report, {0} distinct codes:", skippedReport.Count);
+                foreach (var kv in skippedReport.OrderByDescending(kv => kv.Value))
+                {
+                    logger.Notification("[inventorytransfer]   {0} x{1}", kv.Key, kv.Value);
+                }
+            }
+
             string sourceBreakdown = string.Join(", ",
                 savedBySource.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key}={kv.Value}"));
 
@@ -388,7 +532,13 @@ namespace InventoryTransfer
                 $"Extracted {bagContentsExtracted} items from held bags.\n" +
                 $"By source — {sourceBreakdown}\n" +
                 $"Saved {savedCount} items.\n" +
-                $"Filtered {filteredCount} blocks."
+                $"Filtered {filteredCount} blocks." +
+                (skippedReport != null && skippedReport.Count > 0
+                    ? $"\nSkipped {skippedReport.Count} block codes NOT exported — full list in server-main.log."
+                    : "") +
+                (purge
+                    ? $"\nPURGED: emptied {purgedSlots} slots, removed {purgedBlocks} blocks. Anything still visible was NOT exported. Everything removed is in the manifest and restorable via /importinv — except liquids, which are never exported."
+                    : "")
             );
         }
 
@@ -475,6 +625,9 @@ namespace InventoryTransfer
             }
 
             ICoreServerAPI api = args.Caller.Player.Entity.Api as ICoreServerAPI;
+
+            WarnIfPlayerInventoryLib(api, player);
+
             SavedInventoryData loadedData = api.LoadModConfig<SavedInventoryData>("feyd_inventory_transfer.json");
 
             if (loadedData == null || loadedData.Items.Count == 0) return TextCommandResult.Error("No exported data found.");
