@@ -2,6 +2,38 @@
 
 All notable changes to Inventory Transfer are documented here. Newest first.
 
+## 1.10.3 — 2026-08-05
+
+- Fix: `/exportinv --all` no longer crashes with "Can't create itemstack
+  without block!" near a pulverizer. The mechanical-power multiblock filler
+  blocks (`mppulverizertop`, `mpmultiblockwood`) don't follow the
+  `multiblock-*` naming the surrogate skip matched on, so the build-block
+  sweep called the pulverizer surrogate's own OnPickBlock — which throws
+  inside vanilla when it can't resolve its principal block. Surrogates are
+  now recognized by their shared BEMPMultiblock block entity (naming-
+  independent, also fixes potential double-export of large gears).
+- Hardening: any block whose OnPickBlock throws is now logged and reported
+  as skipped instead of aborting the entire export.
+
+## 1.10.2 — 2026-08-05
+
+- Fix: multi-piece tapestries (2- and 3-piece sets) no longer arrive as N
+  copies of a single piece. The overflow-chest fill merged stacks by
+  collectible code alone, but every tapestry piece is the same `tapestry`
+  block differing only in its `type` attribute, so the pieces were merged
+  into one. The merge is now attribute-aware, which also protects any other
+  code-shared, attribute-differentiated stacks landing in overflow chests.
+
+## 1.10.1 — 2026-07-29
+
+- Fix: `--all` exports no longer scoop natural Stone-material terrain whose
+  block codes slip past the rock/ore/sandstone prefix check — cracked rock
+  (the 1.20+ unstable-rock blocks that cave walls and mined tunnels convert
+  to, which filled export chests with "cracked granite" etc.), loose
+  stones/boulders/rubble/flints/ores, stalagmites/stalactites, and
+  meteorites. These stay in the ground (and are no longer removed by
+  `--purge`).
+
 ## 1.10.0 — 2026-07-25
 
 - New `/exportinv --all --purge`: turns the export into a CUT. After the

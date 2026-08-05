@@ -9,6 +9,7 @@ using Vintagestory.API.Config;
 using Vintagestory.API.Datastructures;
 using Vintagestory.API.Util;
 using Vintagestory.API.MathTools;
+using Vintagestory.GameContent.Mechanics;
 
 namespace InventoryTransfer
 {
@@ -160,6 +161,21 @@ namespace InventoryTransfer
                 skippedReport[key] = skippedReport.GetValueOrDefault(key, 0) + 1;
             }
 
+            // Belt-and-braces: a block's OnPickBlock implementation can itself throw (vanilla
+            // BlockMPMultiblockPulverizer does when orphaned from its principal). One bad block
+            // must not abort the entire export — log it, count it as skipped, keep walking.
+            ItemStack SafePick(Block b, BlockPos p)
+            {
+                try { return b.OnPickBlock(player.Entity.World, p); }
+                catch (Exception e)
+                {
+                    player.Entity.Api.Logger.Warning(
+                        "[inventorytransfer] OnPickBlock threw for {0} at {1}: {2}", b.Code, p, e.Message);
+                    ReportSkip("pick-threw:", b.Code?.Path ?? "?");
+                    return null;
+                }
+            }
+
             player.Entity.World.BlockAccessor.WalkBlocks(minPos, maxPos, (block, x, y, z) =>
             {
                 BlockPos pos = new BlockPos(x, y, z);
@@ -185,15 +201,20 @@ namespace InventoryTransfer
                     }
                 }
 
-                if (blockCode.StartsWith("multiblock"))
+                BlockEntity be = player.Entity.World.BlockAccessor.GetBlockEntity(pos);
+
+                // Surrogate positions render as part of their principal structure; when the
+                // principal is purged the surrogates must go too or they linger as ghosts.
+                // Mechanical-power surrogates (pulverizer top "mppulverizertop", large gear
+                // "mpmultiblockwood") don't follow the "multiblock-*" naming — and vanilla
+                // BlockMPMultiblockPulverizer.OnPickBlock THROWS when its principal can't be
+                // resolved, killing the whole export — so ALSO match their shared BEMPMultiblock
+                // block entity, which is naming-independent.
+                if (blockCode.StartsWith("multiblock") || be is BEMPMultiblock)
                 {
-                    // Surrogate positions render as part of their principal structure; when the
-                    // principal is purged the surrogates must go too or they linger as ghosts.
                     purgePositions?.Add(pos);
                     return;
                 }
-
-                BlockEntity be = player.Entity.World.BlockAccessor.GetBlockEntity(pos);
 
                 // PATH 1: any BE that exposes an inventory — chests, crates, barrels, baskets,
                 // toolracks, ground storage, displaycase, shelf, bookshelf, moldrack, scrollrack,
@@ -216,7 +237,7 @@ namespace InventoryTransfer
                     // Ground storage returns a clone of its CONTENTS from OnPickBlock — those
                     // stacks were already collected from the slots above, and blindly adding
                     // the pick duplicated them (the player's 19 copper ingots became ~38).
-                    ItemStack pickedContainer = block.OnPickBlock(player.Entity.World, pos);
+                    ItemStack pickedContainer = SafePick(block, pos);
                     if (pickedContainer != null && pickedContainer.StackSize > 0 &&
                         pickedContainer.Class == EnumItemClass.Block &&
                         pickedContainer.Block?.FirstCodePart() == block.FirstCodePart())
@@ -246,7 +267,7 @@ namespace InventoryTransfer
                     blockCode.Contains("lantern") ||   // metal lantern-up/down + paperlantern
                     blockCode.Contains("glass"))        // window glass-* and leaded glasspane-*
                 {
-                    ItemStack picked = block.OnPickBlock(player.Entity.World, pos);
+                    ItemStack picked = SafePick(block, pos);
                     if (picked != null && picked.StackSize > 0)
                     {
                         allSlots.Add((new DummySlot(picked), "decor"));
@@ -268,7 +289,7 @@ namespace InventoryTransfer
                          blockCode.Contains("brake") ||
                          blockCode.Contains("toggle"))
                 {
-                    ItemStack picked = block.OnPickBlock(player.Entity.World, pos);
+                    ItemStack picked = SafePick(block, pos);
                     if (picked != null && picked.StackSize > 0)
                     {
                         allSlots.Add((new DummySlot(picked), "mechanical"));
@@ -294,7 +315,7 @@ namespace InventoryTransfer
                          blockCode.Contains("torchholder") ||
                          blockCode.Contains("oillamp"))
                 {
-                    ItemStack picked = block.OnPickBlock(player.Entity.World, pos);
+                    ItemStack picked = SafePick(block, pos);
                     if (picked != null && picked.StackSize > 0)
                     {
                         allSlots.Add((new DummySlot(picked), "furniture"));
@@ -310,7 +331,7 @@ namespace InventoryTransfer
                 // Gravel/Leaves/Plant/Liquid/Ice/Snow. Material-based so it stays mod-agnostic.
                 else if (allBlocks && IsCraftedBuildBlock(block, player.Entity.World.BlockAccessor, pos))
                 {
-                    ItemStack picked = block.OnPickBlock(player.Entity.World, pos);
+                    ItemStack picked = SafePick(block, pos);
                     if (picked != null && picked.StackSize > 0)
                     {
                         allSlots.Add((new DummySlot(picked), "block"));
@@ -569,9 +590,15 @@ namespace InventoryTransfer
                     return !cp.StartsWith("log") && !cp.StartsWith("fruittree") &&
                            !cp.StartsWith("sapling") && !cp.Contains("tree");
                 case EnumBlockMaterial.Stone:
-                    // exclude natural rock/ore/sandstone/crystal; keep cobble/bricks/polished/paths
+                    // exclude natural rock/ore/sandstone/crystal, plus the Stone-material terrain
+                    // whose codes don't start with "rock": crackedrock (1.20+ unstable-rock system
+                    // — cave walls / mined tunnels convert to it, so bases are full of them),
+                    // loose surface stones/boulders/rubble/flints/ores, stalagmites/stalactites,
+                    // and meteorites; keep cobble/bricks/polished/paths
                     return !cp.StartsWith("rock") && !cp.StartsWith("ore") &&
-                           !cp.StartsWith("sandstone") && !cp.Contains("crystal");
+                           !cp.StartsWith("sandstone") && !cp.Contains("crystal") &&
+                           !cp.StartsWith("crackedrock") && !cp.StartsWith("loose") &&
+                           !cp.StartsWith("stalag") && !cp.StartsWith("meteorite");
                 default:
                     return false;
             }
@@ -938,7 +965,11 @@ namespace InventoryTransfer
                     {
                         if (stack.StackSize <= 0) break;
                         if (slot.Empty) continue;
-                        if (slot.Itemstack.Collectible.Code.Equals(stack.Collectible.Code))
+                        // Attribute-aware match, not just code: tapestry pieces, painted/typed
+                        // decor, and filled containers all share one collectible code and differ
+                        // only in attributes. Merging on code alone collapsed multi-piece
+                        // tapestries into N copies of one piece (the other pieces vanished).
+                        if (slot.Itemstack.Equals(api.World, stack, GlobalConstants.IgnoredStackAttributes))
                         {
                             int maxStack = slot.Itemstack.Collectible.MaxStackSize;
                             int space = maxStack - slot.Itemstack.StackSize;
