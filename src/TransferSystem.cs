@@ -9,6 +9,7 @@ using Vintagestory.API.Config;
 using Vintagestory.API.Datastructures;
 using Vintagestory.API.Util;
 using Vintagestory.API.MathTools;
+using Vintagestory.GameContent;
 using Vintagestory.GameContent.Mechanics;
 
 namespace InventoryTransfer
@@ -164,9 +165,14 @@ namespace InventoryTransfer
             // Belt-and-braces: a block's OnPickBlock implementation can itself throw (vanilla
             // BlockMPMultiblockPulverizer does when orphaned from its principal). One bad block
             // must not abort the entire export — log it, count it as skipped, keep walking.
+            // A successful pick is additionally checked for render-safety (see
+            // EnsureBookshelfRenderSafe): skipping HERE, before the stack enters allSlots,
+            // matters because it also keeps the position off the purge list — purging a block
+            // whose stack never made the manifest would be plain loss.
             ItemStack SafePick(Block b, BlockPos p)
             {
-                try { return b.OnPickBlock(player.Entity.World, p); }
+                ItemStack st;
+                try { st = b.OnPickBlock(player.Entity.World, p); }
                 catch (Exception e)
                 {
                     player.Entity.Api.Logger.Warning(
@@ -174,6 +180,14 @@ namespace InventoryTransfer
                     ReportSkip("pick-threw:", b.Code?.Path ?? "?");
                     return null;
                 }
+                if (st != null && !EnsureBookshelfRenderSafe(st))
+                {
+                    player.Entity.Api.Logger.Warning(
+                        "[inventorytransfer] {0} at {1} picked a bookshelf stack with unrecoverable type/variant attributes — skipped (rendering it would crash the client)", b.Code, p);
+                    ReportSkip("render-unsafe bookshelf:", b.Code?.Path ?? "?");
+                    return null;
+                }
+                return st;
             }
 
             player.Entity.World.BlockAccessor.WalkBlocks(minPos, maxPos, (block, x, y, z) =>
@@ -391,6 +405,7 @@ namespace InventoryTransfer
 
             // --- PART 3: PROCESS EVERYTHING ---
             Dictionary<string, int> savedBySource = new Dictionary<string, int>();
+            int renderUnsafeDropped = 0;
             foreach (var (slot, source) in allSlots)
             {
                 if (slot.Empty) continue;
@@ -449,6 +464,19 @@ namespace InventoryTransfer
                             continue; 
                         }
                     }
+                }
+
+                // RENDER-SAFETY GUARD — SafePick already covers world-picked blocks, but a
+                // malformed clutter bookshelf stack can also arrive as CONTENTS (chest/bag/
+                // player inventory — e.g. re-exporting a world that received one from a
+                // pre-1.10.4 import). Repair it here or drop it from the manifest; importing
+                // it would crash the destination client on every GUI open.
+                if (!EnsureBookshelfRenderSafe(stack))
+                {
+                    player.Entity.Api.Logger.Warning(
+                        "[inventorytransfer] dropped render-unsafe bookshelf stack {0}x{1} (source {2}) — unrecoverable type/variant attributes", stack.StackSize, stack.Collectible.Code, source);
+                    renderUnsafeDropped += stack.StackSize;
+                    continue;
                 }
 
                 TransferableItem tItem = new TransferableItem();
@@ -554,6 +582,9 @@ namespace InventoryTransfer
                 $"By source — {sourceBreakdown}\n" +
                 $"Saved {savedCount} items.\n" +
                 $"Filtered {filteredCount} blocks." +
+                (renderUnsafeDropped > 0
+                    ? $"\nDropped {renderUnsafeDropped} broken clutter bookshelf items (missing shape data — displaying them crashes the game; details in server-main.log)."
+                    : "") +
                 (skippedReport != null && skippedReport.Count > 0
                     ? $"\nSkipped {skippedReport.Count} block codes NOT exported — full list in server-main.log."
                     : "") +
@@ -561,6 +592,39 @@ namespace InventoryTransfer
                     ? $"\nPURGED: emptied {purgedSlots} slots, removed {purgedBlocks} blocks. Anything still visible was NOT exported. Everything removed is in the manifest and restorable via /importinv — except liquids, which are never exported."
                     : "")
             );
+        }
+
+        // Vanilla clutter bookshelves (the Reso Archives lore shelves that Better Ruins etc.
+        // scatter in ruins) render their item form from "type" + "variant" stack attributes.
+        // A ruin-spawned shelf's BE behavior can hold a null Variant, and vanilla OnPickBlock
+        // then emits a stack with a type but NO variant — and BlockClutterBookshelfWithLore's
+        // genCombinedMesh does not null-check GetTypeProps, so merely DISPLAYING that stack in
+        // any inventory GUI hard-crashes the client with an NRE in
+        // BlockClutterBookshelf.GetOrCreateMesh (reported by Feyd 2026-08-05).
+        // Returns true if the stack is safe (repairing it in place when possible: the owning
+        // variant group is recoverable by searching the block's variant groups for the stack's
+        // type). Returns false if unrecoverable — the caller must drop the stack; a missing
+        // bookshelf beats a client that crashes on every chest open.
+        private static bool EnsureBookshelfRenderSafe(ItemStack stack)
+        {
+            if (!(stack?.Block is BlockClutterBookshelf shelf)) return true;
+            string type = stack.Attributes.GetString("type");
+            // NB GetTypeProps intentionally mutates doublesided-group stacks (fills in random
+            // type1/type2 when absent) — same thing vanilla does on first render; doing it at
+            // export just pins the result into the manifest.
+            if (shelf.GetTypeProps(type, stack, null) != null) return true;
+            if (type != null)
+            {
+                foreach (var group in shelf.variantGroupsByCode)
+                {
+                    if (group.Value.typesByCode.ContainsKey(type))
+                    {
+                        stack.Attributes.SetString("variant", group.Key);
+                        return shelf.GetTypeProps(type, stack, null) != null;
+                    }
+                }
+            }
+            return false;
         }
 
         // Decides whether a plain placed block is a player-built/crafted block worth exporting in
@@ -728,6 +792,17 @@ namespace InventoryTransfer
                                     newStack.Attributes = tree;
                                 }
                             }
+                        }
+
+                        // RENDER-SAFETY GUARD — manifests written before 1.10.4 can carry
+                        // clutter bookshelf stacks with a "type" but no "variant" attribute;
+                        // merely displaying such a stack in any inventory GUI crashes the
+                        // client (see EnsureBookshelfRenderSafe). Repair it, or refuse to
+                        // deliver it into this world and list it in the audit instead.
+                        if (!EnsureBookshelfRenderSafe(newStack))
+                        {
+                            missingItems.Add($"{tItem.ItemCode} x{tItem.Quantity} (broken bookshelf shape data — displaying it would crash the game; not imported)");
+                            continue;
                         }
 
                         // Strip cooked food contents from clay/iron pots — nested ItemStack IDs

@@ -2,6 +2,17 @@
 
 All notable changes to Inventory Transfer are documented here. Newest first.
 
+## 1.10.4 — 2026-08-05
+
+- Fix: exported lore bookshelves (the ruin-spawned "cluttered bookshelf"
+  blocks) could crash the game client with "Object reference not set to an
+  instance of an object" the moment a chest containing them was opened.
+  Ruin-spawned shelves can carry no variant data, and vanilla's item
+  renderer crashes on such a stack. Export now repairs the missing variant
+  where possible; unrepairable shelves are dropped from the manifest and
+  reported instead of crashing the game. Import applies the same repair to
+  manifests written by older versions.
+
 ## 1.10.3 — 2026-08-05
 
 - Fix: `/exportinv --all` no longer crashes with "Can't create itemstack
