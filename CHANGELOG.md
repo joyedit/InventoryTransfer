@@ -2,6 +2,11 @@
 
 All notable changes to Inventory Transfer are documented here. Newest first.
 
+## 1.10.5 — 2026-08-22
+
+- Compatibility release for Vintage Story 1.22.7. Rebuilt against the 1.22.7
+  assemblies; no code changes.
+
 ## 1.10.4 — 2026-08-05
 
 - Fix: exported lore bookshelves (the ruin-spawned "cluttered bookshelf"
