@@ -5,7 +5,7 @@
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <OutputType>Library</OutputType>
     <AssemblyTitle>InventoryTransfer</AssemblyTitle>
-    <AssemblyVersion>1.9.0.0</AssemblyVersion>
+    <AssemblyVersion>1.11.0.0</AssemblyVersion>
     <!-- Isolated outputs so this build never touches the net10/1.22 bin+obj -->
     <BaseOutputPath>bin-1.21/</BaseOutputPath>
     <BaseIntermediateOutputPath>obj-1.21/</BaseIntermediateOutputPath>

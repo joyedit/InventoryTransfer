@@ -2,6 +2,22 @@
 
 All notable changes to Inventory Transfer are documented here. Newest first.
 
+## 1.11.0 — 2026-09-05
+
+- New: `/exportinv --radius N` sets how far the world scan reaches (default
+  30, max 128) — e.g. `/exportinv --radius 100` to catch an outbuilding
+  without dismantling it. Also accepts `--radius=N`, `-r N`, or a bare
+  number. The scan is a cube and its cost is cubic, so large radii make the
+  export take noticeably longer.
+- New: the export summary now reports the exact area scanned, and warns when
+  chunks inside that area were not loaded and therefore not scanned.
+- Fix: placed tool molds and ingot molds are now exported along with their
+  cast contents. They keep their metal outside any inventory, so they were
+  invisible to the scan — and even with `--all` only the bare mold (or one
+  side of an ingot mold) came through.
+- Unknown `/exportinv` options are now rejected instead of ignored, so a
+  typo'd `--al` can no longer run a plain export that looks like `--all`.
+
 ## 1.10.5 — 2026-08-22
 
 - Compatibility release for Vintage Story 1.22.7. Rebuilt against the 1.22.7

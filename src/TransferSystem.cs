@@ -33,6 +33,11 @@ namespace InventoryTransfer
 
     public class TransferSystem : ModSystem
     {
+        // World-scan cube half-width. The default is what every version up to 1.10.5 used;
+        // the cap bounds the cubic cost of a single scan (radius 128 is already ~17M positions).
+        private const int DefaultScanRadius = 30;
+        private const int MaxScanRadius = 128;
+
         public override void Start(ICoreAPI api)
         {
             base.Start(api);
@@ -42,9 +47,10 @@ namespace InventoryTransfer
         public override void StartServerSide(ICoreServerAPI api)
         {
             api.ChatCommands.Create("exportinv")
-                .WithDescription("Exports inventory, nearby containers (as furniture), decor, windmill/mechanical parts; excludes liquids (Radius 30). Add '--all' to also scan every placed crafted build block (walls/floors/doors/etc., skipping natural terrain). '--all --purge' turns the export into a CUT: after the manifest is safely written, everything exported is removed from the world — whatever remains is exactly what was NOT exported. Removed items stay recoverable via /importinv. CAUTION: liquids are never exported and are lost on purge.")
+                .WithDescription("Exports inventory, nearby containers (as furniture), decor, windmill/mechanical parts; excludes liquids. Scans a cube of radius 30 around you by default — '--radius N' (1-128) widens or narrows it, e.g. '/exportinv --radius 100'. Add '--all' to also scan every placed crafted build block (walls/floors/doors/etc., skipping natural terrain). '--all --purge' turns the export into a CUT: after the manifest is safely written, everything exported is removed from the world — whatever remains is exactly what was NOT exported. Removed items stay recoverable via /importinv. CAUTION: liquids are never exported and are lost on purge.")
                 .RequiresPrivilege(Privilege.chat)
-                .WithArgs(api.ChatCommands.Parsers.OptionalWord("mode"), api.ChatCommands.Parsers.OptionalWord("flag"))
+                .WithArgs(api.ChatCommands.Parsers.OptionalWord("arg1"), api.ChatCommands.Parsers.OptionalWord("arg2"),
+                          api.ChatCommands.Parsers.OptionalWord("arg3"), api.ChatCommands.Parsers.OptionalWord("arg4"))
                 .HandleWith(OnCmdExport);
 
             api.ChatCommands.Create("importinv")
@@ -72,18 +78,55 @@ namespace InventoryTransfer
         {
             IServerPlayer player = args.Caller.Player as IServerPlayer;
 
+            // Flags are order-independent words; leading dashes optional throughout.
             // '--all' (also accepts 'all'/'-all') scans every placed crafted build block in range.
             // '--purge' (requires --all, either arg order) removes everything the export
             // captured from the world AFTER the manifest is safely written — the export becomes
             // a cut instead of a copy, and whatever is left standing/in inventories is exactly
             // what the exporter did not pick up.
-            string mode = args.Parsers.Count > 0 ? args[0] as string : null;
-            string flag = args.Parsers.Count > 1 ? args[1] as string : null;
-            bool HasWord(string w) =>
-                (!string.IsNullOrEmpty(mode) && mode.TrimStart('-').Equals(w, StringComparison.OrdinalIgnoreCase)) ||
-                (!string.IsNullOrEmpty(flag) && flag.TrimStart('-').Equals(w, StringComparison.OrdinalIgnoreCase));
-            bool allBlocks = HasWord("all");
-            bool purge = HasWord("purge");
+            // '--radius N' (also '--radius=N', or a bare number) sets the world-scan radius.
+            bool allBlocks = false;
+            bool purge = false;
+            int radius = DefaultScanRadius;
+            List<string> argWords = new List<string>();
+            for (int i = 0; i < args.Parsers.Count; i++)
+            {
+                if (args[i] is string w && !string.IsNullOrWhiteSpace(w)) argWords.Add(w.Trim());
+            }
+            for (int i = 0; i < argWords.Count; i++)
+            {
+                string word = argWords[i].TrimStart('-');
+                string value = null;
+                int sep = word.IndexOfAny(new[] { '=', ':' });
+                if (sep >= 0) { value = word.Substring(sep + 1); word = word.Substring(0, sep); }
+
+                if (word.Equals("all", StringComparison.OrdinalIgnoreCase)) { allBlocks = true; continue; }
+                if (word.Equals("purge", StringComparison.OrdinalIgnoreCase)) { purge = true; continue; }
+
+                bool isRadiusWord = word.Equals("radius", StringComparison.OrdinalIgnoreCase) ||
+                                    word.Equals("r", StringComparison.OrdinalIgnoreCase);
+                // A bare number is accepted as the radius too: /exportinv --all 100.
+                bool isBareNumber = !isRadiusWord && sep < 0 && int.TryParse(word, out _);
+                if (isRadiusWord && value == null && i + 1 < argWords.Count) value = argWords[++i];
+                if (isBareNumber) value = word;
+
+                if (isRadiusWord || isBareNumber)
+                {
+                    if (!int.TryParse(value, out radius))
+                    {
+                        return TextCommandResult.Error($"--radius needs a whole number of blocks (1-{MaxScanRadius}), e.g. /exportinv --radius 100");
+                    }
+                    if (radius < 1 || radius > MaxScanRadius)
+                    {
+                        return TextCommandResult.Error($"--radius must be between 1 and {MaxScanRadius} blocks (got {radius}). The cap keeps one scan from freezing the server for minutes; run a second export from another spot instead.");
+                    }
+                    continue;
+                }
+
+                // Unknown words are rejected rather than ignored: a typo'd '--al' must not
+                // silently run a plain export the player believes was '--all'.
+                return TextCommandResult.Error($"Unknown option '{argWords[i]}'. Usage: /exportinv [--all] [--purge] [--radius N]");
+            }
             if (purge && !allBlocks)
             {
                 return TextCommandResult.Error("--purge only works together with --all: /exportinv --all --purge");
@@ -127,16 +170,44 @@ namespace InventoryTransfer
             }
 
             // --- PART 2: THE ROOM (World Scan) ---
-            int radius = 30;
+            // Cube of `radius` blocks in every direction around the player, clamped to the world
+            // edges so a large radius near a map border (or near bedrock/sky) can't walk out of
+            // bounds. Cost is cubic — radius 30 visits ~227k positions, radius 100 ~8.1M — which
+            // is why MaxScanRadius exists and why the summary reports the box actually scanned.
+            IBlockAccessor scanAccessor = player.Entity.World.BlockAccessor;
             BlockPos center = player.Entity.Pos.AsBlockPos;
-            BlockPos minPos = center.AddCopy(-radius, -radius, -radius);
-            BlockPos maxPos = center.AddCopy(radius, radius, radius);
+            BlockPos minPos = new BlockPos(
+                GameMath.Clamp(center.X - radius, 0, scanAccessor.MapSizeX - 1),
+                GameMath.Clamp(center.Y - radius, 0, scanAccessor.MapSizeY - 1),
+                GameMath.Clamp(center.Z - radius, 0, scanAccessor.MapSizeZ - 1));
+            BlockPos maxPos = new BlockPos(
+                GameMath.Clamp(center.X + radius, 0, scanAccessor.MapSizeX - 1),
+                GameMath.Clamp(center.Y + radius, 0, scanAccessor.MapSizeY - 1),
+                GameMath.Clamp(center.Z + radius, 0, scanAccessor.MapSizeZ - 1));
+
+            // Chunks that aren't loaded are invisible to the walk below — it would simply find
+            // nothing there and report a clean export, which is exactly the "did my furnace make
+            // it?" doubt this radius option exists to remove. Count them up front (one probe per
+            // chunk in the box) so the summary can say so out loud.
+            int unloadedChunks = 0;
+            int cs = GlobalConstants.ChunkSize;
+            for (int cx = minPos.X / cs; cx <= maxPos.X / cs; cx++)
+            {
+                for (int cy = minPos.Y / cs; cy <= maxPos.Y / cs; cy++)
+                {
+                    for (int cz = minPos.Z / cs; cz <= maxPos.Z / cs; cz++)
+                    {
+                        if (scanAccessor.GetChunkAtBlockPos(new BlockPos(cx * cs, cy * cs, cz * cs)) == null) unloadedChunks++;
+                    }
+                }
+            }
 
             int decorPicked = 0;
             int containerBlocksPicked = 0;
             int mechanicalPicked = 0;
             int buildBlocksPicked = 0;
             int furniturePicked = 0;
+            int moldsPicked = 0;
 
             // Multiblock structures (trunks, large gears, pulverizers) fill their extra
             // positions with surrogate "multiblock-*" blocks whose OnPickBlock DELEGATES to the
@@ -188,6 +259,22 @@ namespace InventoryTransfer
                     return null;
                 }
                 return st;
+            }
+
+            // Same belt-and-braces wrapper for GetDrops, which is what we must use instead of
+            // OnPickBlock for blocks that hold contents outside an inventory (molds). GetDrops
+            // is the accessor vanilla itself calls when the block is broken, so it returns the
+            // full, state-aware set of stacks rather than just the block's item form.
+            ItemStack[] SafeDrops(Block b, BlockPos p)
+            {
+                try { return b.GetDrops(player.Entity.World, p, player, 1f); }
+                catch (Exception e)
+                {
+                    player.Entity.Api.Logger.Warning(
+                        "[inventorytransfer] GetDrops threw for {0} at {1}: {2}", b.Code, p, e.Message);
+                    ReportSkip("drops-threw:", b.Code?.Path ?? "?");
+                    return null;
+                }
             }
 
             player.Entity.World.BlockAccessor.WalkBlocks(minPos, maxPos, (block, x, y, z) =>
@@ -270,10 +357,43 @@ namespace InventoryTransfer
                     return;
                 }
 
+                // PATH 1.5: MOLDS (tool molds + ingot molds). These keep their cast metal in
+                // plain block-entity FIELDS (MetalContent/FillLevel, MoldLeft/MoldRight +
+                // ContentsLeft/ContentsRight), not in an inventory — so PATH 1 never sees them —
+                // and their codes match none of the keyword paths below. A placed mold was
+                // therefore invisible to the export unless --all was used, and even then
+                // OnPickBlock returned only the bare mold block (tool molds) or only the
+                // currently selected side's mold (ingot molds), losing the second mold and every
+                // cast ingot. Reported by Feyd 2026-08-29 ("lost a few molds").
+                // GetDrops is the state-aware accessor vanilla uses when the block is broken: it
+                // yields the mold(s) plus any HARDENED contents, shattered shards for a shattered
+                // mold, and nothing for still-molten metal (unrecoverable in vanilla too).
+                // Mod-agnostic: vanilla BE types, or any block-entity block coded "*mold*"
+                // (moldracks never reach here — they have an inventory and return in PATH 1).
+                if (be is BlockEntityToolMold || be is BlockEntityIngotMold ||
+                    (be != null && blockCode.Contains("mold")))
+                {
+                    ItemStack[] moldDrops = SafeDrops(block, pos);
+                    int addedFromMold = 0;
+                    if (moldDrops != null)
+                    {
+                        foreach (ItemStack moldStack in moldDrops)
+                        {
+                            if (moldStack == null || moldStack.StackSize <= 0) continue;
+                            allSlots.Add((new DummySlot(moldStack), "mold"));
+                            moldsPicked++;
+                            addedFromMold++;
+                        }
+                    }
+                    // Only purge a mold position we actually captured something from — an empty
+                    // drop list (e.g. a shattered mold with no shard drops) must not be deleted.
+                    if (addedFromMold > 0) purgePositions?.Add(pos);
+                    else ReportSkip("drops-empty (mold):", blockCode);
+                }
                 // PATH 2: decor blocks (banners, tapestries, rugs, etc.). Lift as their item form
                 // — OnPickBlock preserves painted/dyed/type attributes — and drop into the import
                 // chest so the user can re-hang them manually in the new world.
-                if (blockCode.Contains("banner") ||
+                else if (blockCode.Contains("banner") ||
                     blockCode.Contains("tapestry") ||
                     blockCode.Contains("painting") ||
                     blockCode.Contains("rug") ||
@@ -444,7 +564,7 @@ namespace InventoryTransfer
                 // In --all mode the whole bulk cull is OFF: --all means "take everything", so
                 // logs, planks, stone and soil sitting in trunks/chests/player inventory are
                 // stored property and must travel (they were being silently dropped before).
-                if (!allBlocks && stack.Class == EnumItemClass.Block && source != "container_block" && source != "decor" && source != "bag" && source != "mechanical" && source != "block" && source != "furniture")
+                if (!allBlocks && stack.Class == EnumItemClass.Block && source != "container_block" && source != "decor" && source != "bag" && source != "mechanical" && source != "block" && source != "furniture" && source != "mold")
                 {
                     Block block = stack.Block;
                     if (!block.Code.Path.Contains("chest") &&
@@ -572,11 +692,16 @@ namespace InventoryTransfer
 
             return TextCommandResult.Success(
                 $"Export Complete.\n" +
+                $"Scanned a {(maxPos.X - minPos.X + 1)}x{(maxPos.Y - minPos.Y + 1)}x{(maxPos.Z - minPos.Z + 1)} block area (radius {radius}) around you.\n" +
+                (unloadedChunks > 0
+                    ? $"WARNING: {unloadedChunks} chunk(s) inside that area were not loaded and were NOT scanned — anything stored there was left behind. Reduce the radius or walk the area first so it loads, then export again.\n"
+                    : "") +
                 $"Scanned {containersScanned} containers.\n" +
                 $"Picked {containerBlocksPicked} container blocks (incl. empty furniture).\n" +
                 $"Picked {decorPicked} decor blocks.\n" +
                 $"Picked {mechanicalPicked} windmill/mechanical parts.\n" +
                 $"Picked {furniturePicked} furniture blocks.\n" +
+                $"Picked {moldsPicked} mold stacks (molds + their cast contents).\n" +
                 (allBlocks ? $"Picked {buildBlocksPicked} build blocks (--all).\n" : "") +
                 $"Extracted {bagContentsExtracted} items from held bags.\n" +
                 $"By source — {sourceBreakdown}\n" +

@@ -5,7 +5,7 @@
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <OutputType>Library</OutputType>
     <AssemblyTitle>InventoryTransfer</AssemblyTitle>
-    <AssemblyVersion>1.9.0.0</AssemblyVersion>
+    <AssemblyVersion>1.11.0.0</AssemblyVersion>
     <VINTAGE_STORY_PATH>/home/deftones/Apps/vintagestory</VINTAGE_STORY_PATH>
     <!-- Keep the default **/*.cs glob from sweeping the 1.21 (net8) build's generated
          AssemblyInfo.cs, which lives outside the standard obj/ and would otherwise cause
